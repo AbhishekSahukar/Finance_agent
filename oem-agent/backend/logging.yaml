@@ -1,0 +1,24 @@
+version: 1
+disable_existing_loggers: false
+formatters:
+  standard:
+    format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    datefmt: "%H:%M:%S"
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: standard
+    stream: ext://sys.stdout
+root:
+  level: INFO
+  handlers: [console]
+loggers:
+  api.services.oem_agent:
+    level: DEBUG
+    propagate: true
+  langchain:
+    level: WARNING
+    propagate: false
+  httpx:
+    level: WARNING
+    propagate: false
