@@ -1,15 +1,4 @@
-"""
-OEM Financial Agent — LangGraph 4-node workflow.
 
-  ingest_pdfs → extract_metrics → validate → synthesize_summary
-
-Fixes vs previous version:
-  1. Period label is detected from the PDF text itself (regex scan for year/quarter
-     patterns) instead of hardcoding "FY2025" / "Q4 2025".
-  2. Unit normalisation delegated entirely to extraction_tools._build()
-     (EUR m → EUR bn auto-conversion).
-  3. System prompt passes the detected period label so LLM uses it verbatim.
-"""
 
 import base64
 import json
@@ -292,29 +281,68 @@ class OEMGenerationService:
         return self._assemble(company, report_type, period_label, tool_results)
 
     def _assemble(self, company, report_type, period_label, tool_results) -> dict:
-        def _get(tool_name, canonical):
-            r = tool_results.get(tool_name)
-            if r and isinstance(r, dict):
-                return r
+        def _not_reported_stub(canonical: str) -> dict:
             return dict(
                 canonical_name=canonical, value=None,
                 formatted_value="Not Reported", unit="",
                 period=period_label, found_as="",
                 is_substitute=False, substitute_note=None,
-                source_page=None, not_reported=True,
+                source_page=None, not_reported=True, derived=False,
             )
+
+        def _get(tool_name: str, canonical: str) -> dict:
+            r = tool_results.get(tool_name)
+            if r and isinstance(r, dict):
+                return r
+            return _not_reported_stub(canonical)
 
         eps_div = tool_results.get("extract_eps_dividend") or {}
         if not isinstance(eps_div, dict):
             eps_div = {}
 
+        revenue    = _get("extract_revenue",           "Revenue")
+        ebit       = _get("extract_ebit",              "EBIT")
+        ebit_margin = _get("extract_ebit_margin",      "EBIT Margin")
+
+        # ── EBIT Margin derivation ────────────────────────────────────────────
+        # If the tool call for EBIT Margin failed (not_reported=True) but we
+        # successfully extracted both EBIT and Revenue, compute the margin
+        # ourselves and flag it as derived so the table shows a ≈ badge.
+        if (
+            ebit_margin.get("not_reported")
+            and ebit.get("value") is not None
+            and revenue.get("value") is not None
+            and revenue["value"] != 0
+        ):
+            derived_pct = round((ebit["value"] / revenue["value"]) * 100, 1)
+            ebit_margin = dict(
+                canonical_name="EBIT Margin",
+                value=derived_pct,
+                formatted_value=f"{derived_pct:.1f}%",
+                unit="%",
+                period=period_label,
+                found_as="Derived: EBIT ÷ Revenue",
+                is_substitute=True,
+                substitute_note=(
+                    f"EBIT Margin derived as EBIT ÷ Revenue "
+                    f"({ebit['formatted_value']} ÷ {revenue['formatted_value']} × 100)"
+                ),
+                source_page=None,
+                not_reported=False,
+                derived=True,
+            )
+            logger.info(
+                "[Agent] EBIT Margin derived for %s (%s): %.1f%%",
+                company, period_label, derived_pct,
+            )
+
         return {
             "company":             company,
             "report_type":         report_type,
             "period_label":        period_label,
-            "revenue":             _get("extract_revenue",           "Revenue"),
-            "ebit":                _get("extract_ebit",              "EBIT"),
-            "ebit_margin":         _get("extract_ebit_margin",       "EBIT Margin"),
+            "revenue":             revenue,
+            "ebit":                ebit,
+            "ebit_margin":         ebit_margin,
             "cash_kpi":            _get("extract_cash_kpi",          "Free Cash Flow"),
             "net_liquidity":       _get("extract_net_liquidity",     "Net Liquidity"),
             "return_on_capital":   _get("extract_return_on_capital", "ROIC"),
