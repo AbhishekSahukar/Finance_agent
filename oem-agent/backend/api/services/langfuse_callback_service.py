@@ -48,7 +48,16 @@ EXTRACTION RULES — follow every rule exactly:
 9. Pass `unit` exactly as written in the report (e.g. 'EUR m', 'EUR bn', '€ million').
 10. EBIT Margin: pass raw_value as a percentage number (5.3 for 5.3%). Do NOT pass unit.
 11. Make one tool call per KPI. Do not batch multiple KPIs into a single call.
-12. For extract_eps_dividend: NEVER set not_reported=true if you have found eps_value.
+12. COST OF CAPITAL — extract only genuine WACC disclosures:
+    ONLY extract Cost of Capital when the report explicitly discloses a WEIGHTED AVERAGE
+    cost of capital (WACC) as a single blended percentage (e.g. Mercedes-Benz WACC = 9.5%).
+    Do NOT extract any of these as Cost of Capital:
+      - "Minimum rate of return" / "Mindestrendite" (BMW EVA input = cost of equity, NOT WACC)
+      - Goodwill impairment discount rates (these are segment-specific, not company WACC)
+      - Project hurdle rates
+    If the percentage you found is described as "minimum return on equity" or appears in
+    an EVA / value-added section, set not_disclosed=true instead.
+13. For extract_eps_dividend: NEVER set not_reported=true if you have found eps_value.
     not_reported=true means the value does not exist in the report at all.
     If EPS is present but no dividend is declared (e.g. quarterly report), pass
     eps_value with the found number and simply omit dividend_value — do not set

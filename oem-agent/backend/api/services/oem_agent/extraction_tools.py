@@ -1,5 +1,4 @@
 
-
 import logging
 from typing import Optional
 from langchain_core.tools import StructuredTool
@@ -57,8 +56,13 @@ KPI_SYNONYMS: dict[str, list[str]] = {
         "roce automotive segment",
     ],
     "Cost of Capital": [
+        # Only map terms that explicitly describe a blended cost of capital or WACC.
+        # Deliberately excluded: "required return", "minimum return", "threshold return"
+        # — these appear in BMW's EVA section describing cost of equity, not WACC,
+        # and caused a false-positive extraction of BMW's minimum rate (13.7%).
         "wacc", "weighted average cost of capital", "hurdle rate",
-        "cost of capital", "required return", "minimum return", "threshold return",
+        "cost of capital", "cost of debt and equity",
+        "weighted cost of capital", "blended cost of capital",
     ],
     "EPS": [
         "eps", "earnings per share", "basic eps", "diluted eps",
@@ -178,10 +182,13 @@ def _build(
     """
     resolved, is_sub = _resolve(found_as) if found_as else (canonical, False)
 
-    # Build substitution note
+    # Build substitution note.
+    # Suppress the note when not_reported=True — a substitution note implies
+    # the value was extracted, which is misleading when nothing was found.
+    # Exception: derived KPIs always show their derivation note.
     if derived and derived_note:
         note = derived_note
-    elif is_sub:
+    elif is_sub and not not_reported:
         note = f"'{found_as}' used as equivalent for '{canonical}' (KPI synonym map)"
     else:
         note = None

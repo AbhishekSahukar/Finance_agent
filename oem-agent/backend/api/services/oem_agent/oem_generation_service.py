@@ -1,4 +1,5 @@
 
+import asyncio
 import base64
 import json
 import logging
@@ -83,6 +84,45 @@ _PERIOD_PATTERNS: list[tuple[re.Pattern, str]] = [
     # Generic German date range → Q1: "1. Januar bis 31. März 2026"
     (re.compile(r'1\.\s*januar.*?31\.\s*m[äa]rz\s+(\d{4})\b', re.I), "Q1 {year}"),
 
+    # ── Additional German quarterly formats (VW, BMW) ──
+    # "Zwischenmitteilung zum 31. März 2026" (Q1), "30. Juni" (Q2), "30. Sept" (Q3)
+    (re.compile(r'zwischenmitteilung.*?31\.\s*m[äa]rz\s+(\d{4})\b',  re.I), "Q1 {year}"),
+    (re.compile(r'zwischenmitteilung.*?30\.\s*juni\s+(\d{4})\b',      re.I), "Q2 {year}"),
+    (re.compile(r'zwischenmitteilung.*?30\.\s*sept(?:ember)?\s+(\d{4})\b', re.I), "Q3 {year}"),
+    (re.compile(r'zwischenmitteilung.*?31\.\s*dez(?:ember)?\s+(\d{4})\b',  re.I), "Q4 {year}"),
+    # "Quartalsmitteilung" / "Quartalsbericht"
+    (re.compile(r'quartalsmitteilung\s+q(\d)\s+(\d{4})\b',           re.I), "Q{q} {year}"),
+    (re.compile(r'erster\s+quartalsbericht\s+(\d{4})\b',              re.I), "Q1 {year}"),
+    (re.compile(r'zweiter\s+quartalsbericht\s+(\d{4})\b',             re.I), "Q2 {year}"),
+    (re.compile(r'dritter\s+quartalsbericht\s+(\d{4})\b',             re.I), "Q3 {year}"),
+    (re.compile(r'vierter\s+quartalsbericht\s+(\d{4})\b',             re.I), "Q4 {year}"),
+    # "3 Monate / drei Monate" → Q1
+    (re.compile(r'\b(?:3|drei)\s+monate(?:n)?\s+(\d{4})\b',         re.I), "Q1 {year}"),
+    # "Zwischenbericht zum ersten Quartal YYYY"
+    (re.compile(r'zwischenbericht.*?ersten\s+quartal\s+(\d{4})\b',     re.I), "Q1 {year}"),
+    (re.compile(r'zwischenbericht.*?zweiten\s+quartal\s+(\d{4})\b',    re.I), "Q2 {year}"),
+    (re.compile(r'zwischenbericht.*?dritten\s+quartal\s+(\d{4})\b',    re.I), "Q3 {year}"),
+    (re.compile(r'zwischenbericht.*?vierten\s+quartal\s+(\d{4})\b',    re.I), "Q4 {year}"),
+    # English: "January to March 2026" / "January – March 2026"
+    (re.compile(r'january\s+(?:to|through|[-–])\s+march\s+(\d{4})\b',re.I), "Q1 {year}"),
+    (re.compile(r'april\s+(?:to|through|[-–])\s+june\s+(\d{4})\b',   re.I), "Q2 {year}"),
+    (re.compile(r'july\s+(?:to|through|[-–])\s+september\s+(\d{4})\b',re.I), "Q3 {year}"),
+    # "Three months ended March 31, 2026"
+    (re.compile(r'three\s+months\s+ended\s+march\s+\d+,?\s+(\d{4})\b', re.I), "Q1 {year}"),
+    (re.compile(r'three\s+months\s+ended\s+june\s+\d+,?\s+(\d{4})\b',  re.I), "Q2 {year}"),
+    (re.compile(r'three\s+months\s+ended\s+(?:sept(?:ember)?|sep)\s+\d+,?\s+(\d{4})\b', re.I), "Q3 {year}"),
+
+    # ── Additional VW / international quarterly formats ──
+    # "Three-Month Report January 1 to March 31, 2026"
+    (re.compile(r'three[-\s]month\s+report.*?march.*?(\d{4})\b',  re.I), "Q1 {year}"),
+    (re.compile(r'three[-\s]month\s+report.*?june.*?(\d{4})\b',   re.I), "Q2 {year}"),
+    (re.compile(r'three[-\s]month\s+report.*?sept.*?(\d{4})\b',   re.I), "Q3 {year}"),
+    # "Quartalsmitteilung zum 31. März 2026"  (VW quarterly title format)
+    (re.compile(r'quartalsmitteilung.*?märz.*?(\d{4})\b',     re.I), "Q1 {year}"),
+    (re.compile(r'quartalsmitteilung.*?juni.*?(\d{4})\b',           re.I), "Q2 {year}"),
+    (re.compile(r'quartalsmitteilung.*?sept.*?(\d{4})\b',           re.I), "Q3 {year}"),
+    (re.compile(r'quartalsmitteilung.*?dez.*?(\d{4})\b',            re.I), "Q4 {year}"),
+
     # Bare year as last resort — only used when report_type=FY
     (re.compile(r'\b(20[2-9]\d)\b'),                             "FY{year}"),
 ]
@@ -97,7 +137,7 @@ def _detect_period(text: str, report_type: str) -> str:
       FY  → "FY2025"
       Q   → "Q4 2025"
     """
-    sample = text[:3000]
+    sample = text[:8000]   # 8000 chars covers 2-3 PDF pages; period text may be on page 2
 
     if report_type == "FY":
         # For full-year reports use only FY / annual / bare-year patterns
@@ -129,10 +169,10 @@ def _detect_period(text: str, report_type: str) -> str:
 
 # Smart chunking limits — see _extract_pdf_text docstring for rationale.
 _MAX_CHARS_QUARTERLY  = 100_000
-_MAX_CHARS_FY_HEAD    =  40_000   # Front: cover page, headline KPIs (Revenue/EBIT/FCF)
-_MAX_CHARS_FY_MIDDLE  =  80_000   # Middle segment: management-report KPI tables
+_MAX_CHARS_FY_HEAD    =  30_000   # Front: cover page, headline KPIs (Revenue/EBIT/FCF)
+_MAX_CHARS_FY_MIDDLE  =  60_000   # Middle-A and Middle-B windows (each 60k)
                                    # (Net Liquidity, ROIC, shares outstanding for BMW)
-_MAX_CHARS_FY_TAIL    = 110_000   # End: financial statements, notes, EPS tables
+_MAX_CHARS_FY_TAIL    =  80_000   # End: financial statements, notes, EPS tables
 
 # Middle chunk target: chars at ~55–65% of document length.
 # BMW Net Financial Assets estimated at chars ~1.1M–1.4M in a 1.7M-char doc (~65–83%).
@@ -170,27 +210,34 @@ def _extract_pdf_text(content_b64: str, report_type: str = "Q") -> str:
 
         min_for_chunking = _MAX_CHARS_FY_HEAD + _MAX_CHARS_FY_MIDDLE + _MAX_CHARS_FY_TAIL
         if report_type == "FY" and total_chars > min_for_chunking:
-            head   = full_text[:_MAX_CHARS_FY_HEAD]
+            head = full_text[:_MAX_CHARS_FY_HEAD]
 
-            # Middle chunk centred at 70% of document length.
-            mid_centre  = int(total_chars * _MAX_CHARS_FY_MIDDLE_CENTRE_PCT)
-            mid_start   = max(_MAX_CHARS_FY_HEAD, mid_centre - _MAX_CHARS_FY_MIDDLE // 2)
-            mid_end     = min(total_chars - _MAX_CHARS_FY_TAIL, mid_start + _MAX_CHARS_FY_MIDDLE)
-            middle = full_text[mid_start:mid_end]
+            # Middle-A: 70% centroid — BMW Automotive Net Financial Assets
+            mid_a_ctr   = int(total_chars * _MAX_CHARS_FY_MIDDLE_CENTRE_PCT)
+            mid_a_start = max(_MAX_CHARS_FY_HEAD, mid_a_ctr - _MAX_CHARS_FY_MIDDLE // 2)
+            mid_a_end   = min(total_chars - _MAX_CHARS_FY_TAIL, mid_a_start + _MAX_CHARS_FY_MIDDLE)
+            middle_a    = full_text[mid_a_start:mid_a_end]
 
-            tail   = full_text[-_MAX_CHARS_FY_TAIL:]
+            # Middle-B: 85% centroid — balance-sheet notes, segment equity, shares outstanding
+            mid_b_ctr   = int(total_chars * 0.85)
+            mid_b_start = max(mid_a_end, mid_b_ctr - _MAX_CHARS_FY_MIDDLE // 2)
+            mid_b_end   = min(total_chars - _MAX_CHARS_FY_TAIL, mid_b_start + _MAX_CHARS_FY_MIDDLE)
+            middle_b    = full_text[mid_b_start:mid_b_end] if mid_b_start < mid_b_end else ""
 
-            sep = "\n\n[... SECTION OMITTED FOR CONTEXT WINDOW ...]\n\n"
-            result = head + sep + middle + sep + tail
+            tail  = full_text[-_MAX_CHARS_FY_TAIL:]
+
+            sep    = "\n\n[... SECTION OMITTED FOR CONTEXT WINDOW ...]\n\n"
+            parts  = [p for p in [head, middle_a, middle_b, tail] if p]
+            result = sep.join(parts)
 
             logger.info(
-                "[PDF] FY 3-chunk: %d total → "
-                "head %d (0–%d) + middle %d (%d–%d) + tail %d (-%d) = %d chars",
+                "[PDF] FY 4-chunk: %d total → "
+                "head %d + mid-A %d (%d–%d) + mid-B %d (%d–%d) + tail %d = %d chars",
                 total_chars,
-                len(head),   _MAX_CHARS_FY_HEAD,
-                len(middle), mid_start, mid_end,
-                len(tail),   _MAX_CHARS_FY_TAIL,
-                len(result),
+                len(head),
+                len(middle_a), mid_a_start, mid_a_end,
+                len(middle_b), mid_b_start, mid_b_end,
+                len(tail), len(result),
             )
         else:
             max_chars = _MAX_CHARS_QUARTERLY
@@ -265,8 +312,17 @@ class OEMGenerationService:
     # ── Node 2: extract ───────────────────────────────────────────────────────
 
     async def extract_metrics(self, state: OEMGraphState) -> dict:
-        """One focused LLM call per file with detected period label."""
-        logger.info("[Agent] extract_metrics — %d files", len(state["files"]))
+        """
+        Run one focused LLM call per file — all files processed concurrently.
+
+        asyncio.gather fires all 6 LLM calls at the same time instead of waiting
+        for each to finish before starting the next. Total time drops from
+        sum(all files) to max(slowest file) — roughly 6x faster for 6 files.
+
+        asyncio.gather preserves input order, so all_extractions is always
+        in the same order as state["files"] regardless of which call finishes first.
+        """
+        logger.info("[Agent] extract_metrics — %d files (parallel)", len(state["files"]))
 
         base_system_prompt = await self._langfuse.aget_prompt(
             PromptId.OEM_EXTRACTION_SYSTEM_PROMPT
@@ -277,63 +333,79 @@ class OEMGenerationService:
             callbacks.append(cb)
 
         config = {"callbacks": callbacks} if callbacks else {}
-        all_extractions: list[dict] = []
 
-        for f in state["files"]:
-            company      = f.get("company", "Unknown")
-            report_type  = f.get("report_type", "FY")
-            filename     = f.get("filename", "unknown.pdf")
-            period_label = f.get("period_label") or (
-                "FY2025" if report_type == "FY" else "Q4 2025"
+        # Build one coroutine per file and gather them all concurrently.
+        tasks = [
+            self._extract_single_file(f, base_system_prompt, config)
+            for f in state["files"]
+        ]
+        all_extractions = await asyncio.gather(*tasks)
+
+        return {"extractions": list(all_extractions), "status": "extracted"}
+
+    async def _extract_single_file(
+        self,
+        f: dict,
+        base_system_prompt: str,
+        config: dict,
+    ) -> dict:
+        """
+        Run the LLM extraction for a single file.
+        Called concurrently by extract_metrics via asyncio.gather.
+        """
+        company      = f.get("company", "Unknown")
+        report_type  = f.get("report_type", "FY")
+        filename     = f.get("filename", "unknown.pdf")
+        period_label = f.get("period_label") or (
+            "FY2025" if report_type == "FY" else "Q4 2025"
+        )
+        extracted_text = f.get("extracted_text", "")
+
+        if not extracted_text or extracted_text.startswith("[ERROR"):
+            logger.warning("[Agent] No text for %s — stub", filename)
+            return self._stub(f, period_label)
+
+        report_desc = (
+            f"Full Year ({period_label})"
+            if report_type == "FY"
+            else f"Quarterly ({period_label})"
+        )
+
+        focused_system = (
+            f"{base_system_prompt}\n\n"
+            f"=== CURRENT FILE ===\n"
+            f"Company: {company}\n"
+            f"Report type: {report_desc}\n"
+            f"Period label to use in ALL tool calls: {period_label}\n"
+            f"Filename: {filename}\n\n"
+            f"IMPORTANT RULES FOR THIS FILE:\n"
+            f"1. Use period='{period_label}' in every single tool call — no other value.\n"
+            f"2. Pass the `unit` field exactly as written in the report "
+            f"(e.g. 'EUR m', 'EUR bn', 'in millions') — the system will convert automatically.\n"
+            f"3. Call every tool. If a KPI is absent, call the tool with not_reported=true.\n"
+            f"4. Do NOT skip tools for missing data."
+        )
+
+        messages = [
+            SystemMessage(content=focused_system),
+            HumanMessage(content=(
+                f"Extract all financial KPIs from this {company} "
+                f"{'full-year' if report_type == 'FY' else 'quarterly'} report:\n\n"
+                f"{extracted_text}"
+            )),
+        ]
+
+        try:
+            logger.info("[Agent] → Starting extraction: %s (%s)", company, period_label)
+            response = await self._llm.ainvoke(messages, config=config)
+            extraction = self._parse_single_file_response(
+                response, company, report_type, period_label
             )
-            extracted_text = f.get("extracted_text", "")
-
-            if not extracted_text or extracted_text.startswith("[ERROR"):
-                logger.warning("[Agent] No text for %s — stub", filename)
-                all_extractions.append(self._stub(f, period_label))
-                continue
-
-            report_desc = (
-                f"Full Year ({period_label})"
-                if report_type == "FY"
-                else f"Quarterly ({period_label})"
-            )
-
-            focused_system = (
-                f"{base_system_prompt}\n\n"
-                f"=== CURRENT FILE ===\n"
-                f"Company: {company}\n"
-                f"Report type: {report_desc}\n"
-                f"Period label to use in ALL tool calls: {period_label}\n"
-                f"Filename: {filename}\n\n"
-                f"IMPORTANT RULES FOR THIS FILE:\n"
-                f"1. Use period='{period_label}' in every single tool call — no other value.\n"
-                f"2. Pass the `unit` field exactly as written in the report "
-                f"(e.g. 'EUR m', 'EUR bn', 'in millions') — the system will convert automatically.\n"
-                f"3. Call every tool. If a KPI is absent, call the tool with not_reported=true.\n"
-                f"4. Do NOT skip tools for missing data."
-            )
-
-            messages = [
-                SystemMessage(content=focused_system),
-                HumanMessage(content=(
-                    f"Extract all financial KPIs from this {company} "
-                    f"{'full-year' if report_type == 'FY' else 'quarterly'} report:\n\n"
-                    f"{extracted_text}"
-                )),
-            ]
-
-            try:
-                response = await self._llm.ainvoke(messages, config=config)
-                extraction = self._parse_single_file_response(
-                    response, company, report_type, period_label
-                )
-                all_extractions.append(extraction)
-            except Exception as exc:  # pylint: disable=broad-except
-                logger.error("[Agent] LLM call failed for %s: %s", filename, exc)
-                all_extractions.append(self._stub(f, period_label))
-
-        return {"extractions": all_extractions, "status": "extracted"}
+            logger.info("[Agent] ✓ Finished extraction: %s (%s)", company, period_label)
+            return extraction
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("[Agent] LLM call failed for %s: %s", filename, exc)
+            return self._stub(f, period_label)
 
     def _parse_single_file_response(
         self,
@@ -517,6 +589,7 @@ class OEMGenerationService:
         notes, warnings = [], []
         fields = [f for f, _ in KPI_ROW_ORDER]
 
+        seen_notes: set = set()
         for ex in state["extractions"]:
             co     = ex.get("company", "?")
             period = ex.get("period_label", "?")
@@ -525,12 +598,16 @@ class OEMGenerationService:
                 if not kpi or not isinstance(kpi, dict):
                     continue
                 if kpi.get("is_substitute"):
-                    notes.append(dict(
-                        company=co, period=period,
-                        canonical_name=kpi["canonical_name"],
-                        found_as=kpi["found_as"],
-                        note=kpi.get("substitute_note", ""),
-                    ))
+                    # Deduplicate: same company + canonical + found_as across FY and Q reports
+                    dedup_key = (co, kpi["canonical_name"], kpi.get("found_as", ""))
+                    if dedup_key not in seen_notes:
+                        seen_notes.add(dedup_key)
+                        notes.append(dict(
+                            company=co, period=period,
+                            canonical_name=kpi["canonical_name"],
+                            found_as=kpi["found_as"],
+                            note=kpi.get("substitute_note") or "",
+                        ))
                 fv = kpi.get("formatted_value", "")
                 if kpi.get("not_reported") and not str(fv).startswith("N/A"):
                     warnings.append(
@@ -602,17 +679,43 @@ class OEMGenerationService:
                 openai_api_key=self._settings.OPENROUTER_API_KEY,
                 openai_api_base=self._settings.OPENROUTER_BASE_URL,
                 temperature=0.3,
-                max_tokens=600,
+                max_tokens=1024,   # raised: 600 was truncating 4-5 sentence narratives
             )
+
+            # Compact the table — strip Not Reported / N/A before sending.
+            # Reduces input tokens by ~50% and removes noise the LLM over-references.
+            compact: dict[str, dict] = {}
+            for kpi_label, col_cells in table.items():
+                row = {col: cell.get("value", "")
+                       for col, cell in col_cells.items()
+                       if cell.get("value") not in ("Not Reported", "N/A", "", None)}
+                if row:
+                    compact[kpi_label] = row
+
             resp = await llm.ainvoke([
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=(
-                    f"Columns (companies + periods): {columns}\n\n"
-                    f"Substitutions: {json.dumps(state.get('substitution_notes', []))}\n\n"
-                    f"KPI table:\n{json.dumps(table, indent=2)}"
+                    f"Companies and periods: {columns}\n\n"
+                    f"Available KPI values (Not Reported / N/A omitted):\n"
+                    f"{json.dumps(compact, indent=2)}\n\n"
+                    f"Substitutions: {json.dumps(state.get('substitution_notes', []))}"
                 )),
             ])
-            return resp.content
+
+            text = (resp.content or "").strip()
+            if not text:
+                logger.warning("[Agent] Narrative returned empty — building fallback")
+                # Build a minimal factual sentence from whatever we extracted
+                parts = []
+                for kpi_label, row in compact.items():
+                    if row:
+                        vals = ", ".join(f"{col}: {v}" for col, v in list(row.items())[:3])
+                        parts.append(f"{kpi_label} — {vals}")
+                if parts:
+                    return "Key extracted figures: " + "; ".join(parts[:5]) + "."
+                return "Extraction complete — see the KPI table below for all figures."
+            return text
+
         except Exception as exc:  # pylint: disable=broad-except
             logger.warning("[Agent] Narrative failed: %s", exc)
             return "Executive narrative unavailable — see the KPI table below."
