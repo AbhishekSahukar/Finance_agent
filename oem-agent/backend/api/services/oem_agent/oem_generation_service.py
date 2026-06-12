@@ -104,8 +104,35 @@ def _detect_period(text: str, report_type: str) -> str:
 
 # ── PDF text extraction ───────────────────────────────────────────────────────
 
-def _extract_pdf_text(content_b64: str, max_chars: int = 80_000) -> str:
-    """Decode base64 PDF and extract all text via PyMuPDF."""
+# Smart chunking limits — see _extract_pdf_text docstring for rationale.
+_MAX_CHARS_QUARTERLY = 100_000
+_MAX_CHARS_FY_HEAD   =  40_000
+_MAX_CHARS_FY_TAIL   =  80_000
+
+
+def _extract_pdf_text(content_b64: str, report_type: str = "Q") -> str:
+    """
+    Decode a base64 PDF and extract all text via PyMuPDF.
+
+    Root cause of FY2025 Net Liquidity / Market Cap being Not Reported:
+      BMW FY2025 annual report = 1,695,884 chars. Previous code truncated at
+      80,000 chars (head-only). BMW balance-sheet items — Automotive Net
+      Financial Assets (net liquidity) and shares outstanding (market cap) —
+      appear in the financial-statements section which starts ~1.2M chars into
+      the document. The LLM never saw them.
+
+    Strategy by report type:
+
+      Quarterly (report_type="Q"):
+        Short documents (< 100k typically). Send full text up to 100k.
+
+      Full-year (report_type="FY"):
+        HEAD (40k) + TAIL (80k) = 120k chars total.
+          HEAD: cover page, period detection, Revenue, EBIT, FCF — always early.
+          TAIL: financial statements, balance sheet, shares outstanding,
+                net liquidity, RoCE tables — always late in annual reports.
+        A separator line tells the LLM the middle was omitted.
+    """
     try:
         import fitz  # PyMuPDF
         raw = base64.b64decode(content_b64)
@@ -113,10 +140,32 @@ def _extract_pdf_text(content_b64: str, max_chars: int = 80_000) -> str:
         pages = [page.get_text() for page in doc]
         doc.close()
         full_text = "\n\n".join(pages)
-        if len(full_text) > max_chars:
-            logger.warning("[PDF] Truncated %d → %d chars", len(full_text), max_chars)
-            full_text = full_text[:max_chars]
-        return full_text.strip()
+        total_chars = len(full_text)
+
+        if report_type == "FY" and total_chars > (_MAX_CHARS_FY_HEAD + _MAX_CHARS_FY_TAIL):
+            head = full_text[:_MAX_CHARS_FY_HEAD]
+            tail = full_text[-_MAX_CHARS_FY_TAIL:]
+            result = (
+                head
+                + "\n\n[... DOCUMENT MIDDLE OMITTED FOR CONTEXT WINDOW — "
+                  "FINANCIAL TABLES CONTINUE BELOW ...]\n\n"
+                + tail
+            )
+            logger.info(
+                "[PDF] FY smart-chunk: %d total → head %d + tail %d = %d chars sent",
+                total_chars, len(head), len(tail), len(result),
+            )
+        else:
+            max_chars = _MAX_CHARS_QUARTERLY
+            if total_chars > max_chars:
+                logger.warning(
+                    "[PDF] Q report truncated %d → %d chars", total_chars, max_chars
+                )
+                full_text = full_text[:max_chars]
+            result = full_text
+
+        return result.strip()
+
     except ImportError:
         logger.error("[PDF] PyMuPDF not installed — pip install pymupdf")
         return "[ERROR: PyMuPDF not installed. Run: pip install pymupdf]"
@@ -166,7 +215,7 @@ class OEMGenerationService:
         logger.info("[Agent] ingest_pdfs — %d files", len(state["files"]))
         enriched = []
         for f in state["files"]:
-            text = _extract_pdf_text(f["content_b64"])
+            text = _extract_pdf_text(f["content_b64"], report_type=f.get("report_type", "Q"))
             period_label = _detect_period(text, f.get("report_type", "FY"))
             logger.info(
                 "[Agent] %s (%s): %d chars, period='%s'",
