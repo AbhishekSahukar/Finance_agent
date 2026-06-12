@@ -1,4 +1,5 @@
 
+
 import logging
 from typing import Optional
 from langchain_core.tools import StructuredTool
@@ -429,9 +430,17 @@ def extract_eps_dividend(
       - Dividend present, no EPS → EPS marked Not Reported
       - not_applicable=True → both marked N/A (non-listed entity)
     """
-    # Each leg is independently flagged
-    eps_nr  = not_reported or (eps_value is None and not not_applicable)
-    div_nr  = not_reported or (dividend_value is None and not not_applicable)
+    # An explicit numeric value ALWAYS wins over the not_reported flag.
+    #
+    # Bug that caused the regression:
+    #   LLM sets not_reported=True for the whole call when no dividend is
+    #   declared in a quarterly report. The old logic propagated this flag
+    #   to EPS even when eps_value=2.68 was explicitly provided.
+    #
+    # Rule: each leg is Not Reported only when its value is genuinely absent.
+    # The call-level not_reported flag is ignored when a value is present.
+    eps_nr = (eps_value is None) and not not_applicable
+    div_nr = (dividend_value is None) and not not_applicable
 
     eps = _build(
         "EPS", eps_value, unit, period,

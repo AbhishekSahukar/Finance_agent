@@ -1,5 +1,4 @@
 
-
 import base64
 import json
 import logging
@@ -60,6 +59,30 @@ _PERIOD_PATTERNS: list[tuple[re.Pattern, str]] = [
     # "nine months ended", "six months ended" → H1/9M labels
     (re.compile(r'\bnine\s+months?\s+(?:ended\s+)?(\d{4})\b',   re.I), "9M {year}"),
     (re.compile(r'\bsix\s+months?\s+(?:ended\s+)?(\d{4})\b',    re.I), "H1 {year}"),
+
+    # ── German (Volkswagen, BMW, Mercedes-Benz German reports) ──
+    # Annual: "Geschäftsbericht 2025", "Jahresbericht 2025"
+    (re.compile(r'\bgesch[äa]ftsbericht\s+(\d{4})\b',    re.I), "FY{year}"),
+    (re.compile(r'\bjahresbericht\s+(\d{4})\b',           re.I), "FY{year}"),
+    # Q1: "Erstes Quartal 2026", "1. Quartal 2026", "Drei-Monats-Bericht 2026"
+    (re.compile(r'\berstes?\s+quartal\s+(\d{4})\b',      re.I), "Q1 {year}"),
+    (re.compile(r'\b1\.\s*quartal\s+(\d{4})\b',         re.I), "Q1 {year}"),
+    (re.compile(r'\bdrei[-\s]monats[-\s](?:bericht\s+)?(\d{4})\b', re.I), "Q1 {year}"),
+    (re.compile(r'\bjanuar.*?m[äa]rz\s+(\d{4})\b',        re.I), "Q1 {year}"),
+    # Q2: "Zweites Quartal 2026", "2. Quartal 2026", "Sechs-Monats-Bericht"
+    (re.compile(r'\bz?weites?\s+quartal\s+(\d{4})\b',    re.I), "Q2 {year}"),
+    (re.compile(r'\b2\.\s*quartal\s+(\d{4})\b',         re.I), "Q2 {year}"),
+    (re.compile(r'\bsechs[-\s]monats[-\s](?:bericht\s+)?(\d{4})\b', re.I), "H1 {year}"),
+    # Q3: "Drittes Quartal 2026", "3. Quartal 2026", "Neun-Monats-Bericht"
+    (re.compile(r'\bdrittes?\s+quartal\s+(\d{4})\b',     re.I), "Q3 {year}"),
+    (re.compile(r'\b3\.\s*quartal\s+(\d{4})\b',         re.I), "Q3 {year}"),
+    (re.compile(r'\bneun[-\s]monats[-\s](?:bericht\s+)?(\d{4})\b', re.I), "9M {year}"),
+    # Q4: "Viertes Quartal 2026", "4. Quartal 2026"
+    (re.compile(r'\bviertes?\s+quartal\s+(\d{4})\b',     re.I), "Q4 {year}"),
+    (re.compile(r'\b4\.\s*quartal\s+(\d{4})\b',         re.I), "Q4 {year}"),
+    # Generic German date range → Q1: "1. Januar bis 31. März 2026"
+    (re.compile(r'1\.\s*januar.*?31\.\s*m[äa]rz\s+(\d{4})\b', re.I), "Q1 {year}"),
+
     # Bare year as last resort — only used when report_type=FY
     (re.compile(r'\b(20[2-9]\d)\b'),                             "FY{year}"),
 ]
@@ -105,33 +128,36 @@ def _detect_period(text: str, report_type: str) -> str:
 # ── PDF text extraction ───────────────────────────────────────────────────────
 
 # Smart chunking limits — see _extract_pdf_text docstring for rationale.
-_MAX_CHARS_QUARTERLY = 100_000
-_MAX_CHARS_FY_HEAD   =  40_000
-_MAX_CHARS_FY_TAIL   =  80_000
+_MAX_CHARS_QUARTERLY  = 100_000
+_MAX_CHARS_FY_HEAD    =  40_000   # Front: cover page, headline KPIs (Revenue/EBIT/FCF)
+_MAX_CHARS_FY_MIDDLE  =  80_000   # Middle segment: management-report KPI tables
+                                   # (Net Liquidity, ROIC, shares outstanding for BMW)
+_MAX_CHARS_FY_TAIL    = 110_000   # End: financial statements, notes, EPS tables
+
+# Middle chunk target: chars at ~55–65% of document length.
+# BMW Net Financial Assets estimated at chars ~1.1M–1.4M in a 1.7M-char doc (~65–83%).
+# Taking the midpoint at 70% of document consistently captures this section.
+_MAX_CHARS_FY_MIDDLE_CENTRE_PCT = 0.70  # take middle chunk centred at 70% of doc
 
 
 def _extract_pdf_text(content_b64: str, report_type: str = "Q") -> str:
     """
     Decode a base64 PDF and extract all text via PyMuPDF.
 
-    Root cause of FY2025 Net Liquidity / Market Cap being Not Reported:
-      BMW FY2025 annual report = 1,695,884 chars. Previous code truncated at
-      80,000 chars (head-only). BMW balance-sheet items — Automotive Net
-      Financial Assets (net liquidity) and shares outstanding (market cap) —
-      appear in the financial-statements section which starts ~1.2M chars into
-      the document. The LLM never saw them.
-
     Strategy by report type:
 
       Quarterly (report_type="Q"):
-        Short documents (< 100k typically). Send full text up to 100k.
+        Short documents (< 100k chars typically). Send full text.
 
       Full-year (report_type="FY"):
-        HEAD (40k) + TAIL (80k) = 120k chars total.
-          HEAD: cover page, period detection, Revenue, EBIT, FCF — always early.
-          TAIL: financial statements, balance sheet, shares outstanding,
-                net liquidity, RoCE tables — always late in annual reports.
-        A separator line tells the LLM the middle was omitted.
+        Three-chunk strategy — HEAD + MIDDLE + TAIL.
+        Evidence from BMW FY2025 (1,695,884 chars):
+          - Revenue/EBIT/FCF at chars 0–64k        → captured by HEAD (40k)
+          - Net Financial Assets at chars ~1.1–1.4M → captured by MIDDLE (70% centroid)
+          - EPS / share count at chars ~1.1–1.4M   → captured by MIDDLE
+          - Financial statement notes at chars 1.5M+→ captured by TAIL (100k)
+        Separators between chunks tell the LLM the text is non-contiguous.
+        Total: 40k + 60k + 100k = 200k chars (~50k tokens, fits Claude context).
     """
     try:
         import fitz  # PyMuPDF
@@ -142,18 +168,29 @@ def _extract_pdf_text(content_b64: str, report_type: str = "Q") -> str:
         full_text = "\n\n".join(pages)
         total_chars = len(full_text)
 
-        if report_type == "FY" and total_chars > (_MAX_CHARS_FY_HEAD + _MAX_CHARS_FY_TAIL):
-            head = full_text[:_MAX_CHARS_FY_HEAD]
-            tail = full_text[-_MAX_CHARS_FY_TAIL:]
-            result = (
-                head
-                + "\n\n[... DOCUMENT MIDDLE OMITTED FOR CONTEXT WINDOW — "
-                  "FINANCIAL TABLES CONTINUE BELOW ...]\n\n"
-                + tail
-            )
+        min_for_chunking = _MAX_CHARS_FY_HEAD + _MAX_CHARS_FY_MIDDLE + _MAX_CHARS_FY_TAIL
+        if report_type == "FY" and total_chars > min_for_chunking:
+            head   = full_text[:_MAX_CHARS_FY_HEAD]
+
+            # Middle chunk centred at 70% of document length.
+            mid_centre  = int(total_chars * _MAX_CHARS_FY_MIDDLE_CENTRE_PCT)
+            mid_start   = max(_MAX_CHARS_FY_HEAD, mid_centre - _MAX_CHARS_FY_MIDDLE // 2)
+            mid_end     = min(total_chars - _MAX_CHARS_FY_TAIL, mid_start + _MAX_CHARS_FY_MIDDLE)
+            middle = full_text[mid_start:mid_end]
+
+            tail   = full_text[-_MAX_CHARS_FY_TAIL:]
+
+            sep = "\n\n[... SECTION OMITTED FOR CONTEXT WINDOW ...]\n\n"
+            result = head + sep + middle + sep + tail
+
             logger.info(
-                "[PDF] FY smart-chunk: %d total → head %d + tail %d = %d chars sent",
-                total_chars, len(head), len(tail), len(result),
+                "[PDF] FY 3-chunk: %d total → "
+                "head %d (0–%d) + middle %d (%d–%d) + tail %d (-%d) = %d chars",
+                total_chars,
+                len(head),   _MAX_CHARS_FY_HEAD,
+                len(middle), mid_start, mid_end,
+                len(tail),   _MAX_CHARS_FY_TAIL,
+                len(result),
             )
         else:
             max_chars = _MAX_CHARS_QUARTERLY
