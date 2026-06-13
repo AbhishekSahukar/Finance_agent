@@ -1,14 +1,8 @@
-"""
-OEM Agent controller — validates input, invokes LangGraph, serialises response.
 
-Fix: _build_response now derives company names and periods directly from
-     table columns (which are "{company} {period_label}") instead of
-     trying to split on the last word, which broke for names like
-     "Mercedes-Benz FY2025".
-"""
 
 import base64
 import logging
+import re
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, UploadFile
@@ -22,21 +16,17 @@ from api.services.oem_agent.oem_generation_service import build_oem_agent_graph,
 
 logger = logging.getLogger(__name__)
 
-# Known period suffixes — used to split "Company Name FY2025" correctly
-_PERIOD_SUFFIXES = ("FY2025", "Q4 2025", "Q3 2025", "Q2 2025", "Q1 2025",
-                    "Q4 2024", "FY2024", "H1 2025", "H2 2025")
+# Matches any period label produced by _detect_period()
+_PERIOD_RE = re.compile(
+    r'(FY\d{4}|Q[1-4]\s+\d{4}|H[12]\s+\d{4}|9M\s+\d{4}|\d{1,2}M\s+\d{4})$'
+)
 
 
 def _split_column_key(col: str):
-    """
-    Split a column key like 'BMW Group FY2025' → ('BMW Group', 'FY2025').
-    Works for multi-word company names.
-    """
-    for suffix in _PERIOD_SUFFIXES:
-        if col.endswith(suffix):
-            company = col[: -len(suffix)].strip()
-            return company, suffix
-    # fallback: last token is period
+    """Split 'BMW Group FY2025' → ('BMW Group', 'FY2025'). Works for any OEM name."""
+    m = _PERIOD_RE.search(col)
+    if m:
+        return col[:m.start()].strip(), m.group(1)
     parts = col.rsplit(" ", 1)
     return (parts[0], parts[1]) if len(parts) == 2 else (col, "")
 
@@ -88,7 +78,6 @@ class OEMAgentController:
         columns: list[str] = table_raw.get("columns", [])
         rows_raw: dict = table_raw.get("rows", {})
 
-        # Build typed table preserving KPI row order
         typed_table: dict[str, dict] = {}
         for _, label in KPI_ROW_ORDER:
             if label in rows_raw:
@@ -97,13 +86,19 @@ class OEMAgentController:
                     for col_key, cell in rows_raw[label].items()
                 }
 
-        # Derive unique companies and periods from actual column keys
-        companies = list(dict.fromkeys(
-            _split_column_key(col)[0] for col in columns
-        ))
-        periods = list(dict.fromkeys(
-            _split_column_key(col)[1] for col in columns
-        ))
+        companies = list(dict.fromkeys(_split_column_key(col)[0] for col in columns))
+        periods   = list(dict.fromkeys(_split_column_key(col)[1] for col in columns))
+
+        # FIX: note field may be None when a KPI was not_disclosed/not_reported.
+        # KPISubstitutionNote.note is declared as str, so coerce None → "".
+        def _safe_note(n: dict) -> KPISubstitutionNote:
+            return KPISubstitutionNote(
+                company=n.get("company", ""),
+                period=n.get("period", ""),
+                canonical_name=n.get("canonical_name", ""),
+                found_as=n.get("found_as", ""),
+                note=n.get("note") or "",   # ← None → ""
+            )
 
         return RunAgentResponse(
             status=state.get("status", "complete"),
@@ -111,7 +106,7 @@ class OEMAgentController:
             periods=periods,
             table={"columns": columns, "rows": typed_table},
             substitution_notes=[
-                KPISubstitutionNote(**n) for n in state.get("substitution_notes", [])
+                _safe_note(n) for n in state.get("substitution_notes", [])
             ],
             executive_narrative=state.get("executive_narrative", ""),
             warnings=state.get("validation_warnings", []),
