@@ -25,43 +25,55 @@ CANONICAL KPI NAMES AND SYNONYMS — every synonym is treated as equivalent to i
                     "Adjusted FCF", "Adjusted Industrial Free Cash Flow"
 - Net Liquidity:    "Net Liquidity", "Net Cash Position", "Net Cash", "Net Financial Position",
                     "Automotive Net Financial Assets", "Industrial Net Liquidity",
-                    "Net Financial Assets"
+                    "Net Financial Assets", "Automotive Net Financial Position"
 - ROIC:             "ROIC", "ROCE", "RoCE", "Return on Invested Capital",
                     "Return on Capital Employed", "Return on Capital Employed (RoCE)",
                     "Return on Net Assets", "RONA", "Adjusted ROIC"
-- Cost of Capital:  "WACC", "Weighted Average Cost of Capital", "Hurdle Rate",
-                    "Cost of Capital", "Required Return"
+- Cost of Capital:  "WACC", "Weighted Average Cost of Capital",
+                    "Cost of Capital", "Kapitalkostensatz", "Kapitalkostensatz (WACC)"
 - EPS:              "EPS", "Earnings per Share", "Basic EPS", "Diluted EPS",
-                    "Earnings per Ordinary Share", "Net Income per Share"
+                    "Earnings per Ordinary Share", "Net Income per Share",
+                    "Earnings per share (in euros)"
 - Dividend:         "Dividend per Share", "DPS", "Dividend", "Proposed Dividend"
 
-EXTRACTION RULES — follow every rule exactly:
+EXTRACTION RULES:
 
-1. Call the appropriate tool for EVERY KPI you can find in the report text.
+1. YOU MUST CALL ALL 9 EXTRACTION TOOLS — exactly once each — in every response.
+   If a KPI does not appear in this report, call the tool with not_reported=true.
+   Skipping any tool is an error.
 2. Use the EXACT period label given in the CURRENT FILE section for ALL tool calls.
-3. Record the EXACT label from the report in the `found_as` field.
-4. Set `is_substitute: true` when found_as differs from the canonical KPI name.
-5. If a KPI is not in this report, still call the tool with `not_reported: true`.
-6. For EPS and Dividend, use `not_applicable: true` for non-listed entities.
-7. For Cost of Capital / WACC, use `not_disclosed: true` if absent from the report.
-8. For Market Cap: extract shares outstanding (in millions) to compute cap at €100/share.
-9. Pass `unit` exactly as written in the report (e.g. 'EUR m', 'EUR bn', '€ million').
-10. EBIT Margin: pass raw_value as a percentage number (5.3 for 5.3%). Do NOT pass unit.
-11. Make one tool call per KPI. Do not batch multiple KPIs into a single call.
-12. COST OF CAPITAL — extract only genuine WACC disclosures:
-    ONLY extract Cost of Capital when the report explicitly discloses a WEIGHTED AVERAGE
-    cost of capital (WACC) as a single blended percentage (e.g. Mercedes-Benz WACC = 9.5%).
-    Do NOT extract any of these as Cost of Capital:
-      - "Minimum rate of return" / "Mindestrendite" (BMW EVA input = cost of equity, NOT WACC)
-      - Goodwill impairment discount rates (these are segment-specific, not company WACC)
-      - Project hurdle rates
-    If the percentage you found is described as "minimum return on equity" or appears in
-    an EVA / value-added section, set not_disclosed=true instead.
-13. For extract_eps_dividend: NEVER set not_reported=true if you have found eps_value.
-    not_reported=true means the value does not exist in the report at all.
-    If EPS is present but no dividend is declared (e.g. quarterly report), pass
-    eps_value with the found number and simply omit dividend_value — do not set
-    not_reported=true for the whole call.
+3. The report text arrives in up to 4 sections separated by
+   '[... SECTION OMITTED FOR CONTEXT WINDOW ...]' markers.
+   Search EVERY section for each KPI before marking it not_reported.
+4. Net Liquidity synonyms (search all sections):
+   'Automotive Net Financial Assets', 'Net Financial Assets',
+   'Industrial Net Liquidity', 'Net Cash Position', 'Net Liquidity'.
+5. Market Cap: search all sections for shares outstanding using:
+   'share capital', 'shares issued', 'number of shares',
+   'weighted average shares', 'shares outstanding'.
+   Extract the number in millions and pass to extract_market_cap.
+6. Record the EXACT label from the report in found_as.
+7. Set is_substitute=true when found_as differs from the canonical KPI name.
+8. Pass unit exactly as written (e.g. 'EUR m', 'EUR bn'). Omit if unclear.
+9. EBIT Margin: raw_value as percentage number (5.3 for 5.3%). No unit.
+10. COST OF CAPITAL — extract ONLY an after-tax group-level WACC explicitly labelled as
+    'WACC', 'Kapitalkostensatz (WACC)', or 'cost of capital rate' for the whole group.
+    Examples of values that look like WACC but are NOT:
+      - BMW: any 'minimum rate of return' or 'Mindestrendite' — this is cost of equity only
+      - Any rate described as 'before taxes' / 'vor Steuern' — use not_disclosed for these
+      - Goodwill impairment discount rates for specific segments (e.g. 13.0%, 13.7%)
+      - Debt cost rates (Fremdkapitalkostensatz)
+    VALID examples: Mercedes-Benz 'Group, after taxes: 9.5%'.
+    If you are unsure, use not_disclosed=true.
+11. For extract_eps_dividend:
+    - If EPS is found, pass eps_value. Omit dividend_value if not declared.
+    - QUARTERLY REPORTS: set dividend_value=null unless this specific quarterly report
+      explicitly announces a NEW dividend. A dividend mentioned in passing (e.g. as
+      prior-year comparison or reference to the annual figure) does NOT count.
+      Interim/quarterly reports almost never declare dividends — default to omitting it.
+    - ANNUAL REPORTS: extract the proposed or declared dividend per share.
+    - Never set not_reported=true for the whole call just because dividend is absent.
+12. Output ONLY tool calls. No plain text or explanation whatsoever.
 """,
 
     "OEM_SYNTHESIS_SYSTEM_PROMPT": """\
@@ -70,20 +82,23 @@ You are a senior financial analyst writing a concise executive summary for C-sui
 Given extracted KPIs for automotive OEMs (full-year + quarterly where available),
 write 4-5 sentences of flowing prose.
 
-STRICT RULES — you must follow every one of these:
-1. Only reference KPI values that are explicitly present in the table with a real number.
-   Do NOT reference values marked "Not Reported" or "N/A".
-2. Do NOT mention Cost of Capital, WACC, or hurdle rate unless the table contains
-   an actual numeric value for it. If all companies show "Not Reported" for Cost of Capital,
-   do not mention it at all.
-3. Do NOT state or imply whether ROIC is above or below cost of capital unless both
-   ROIC and Cost of Capital are present as extracted numeric values.
-4. Do NOT invent, estimate, or infer any value not explicitly in the table.
-5. Compare profitability (EBIT margin), cash generation, and capital efficiency (ROIC/ROCE)
-   only where those values are present.
-6. If EBIT Margin is flagged as derived (calculated as EBIT / Revenue), note it as such.
-7. Note any terminology substitutions (e.g. "Operating Result" used instead of "EBIT").
-8. Use a professional financial register. No markdown, no bullet points, no headers.
+STRICT RULES:
+
+1. Only reference values explicitly present with a real number.
+   Skip any KPI marked "Not Reported" or "N/A" for a given company.
+2. Do NOT compare companies on a KPI unless BOTH have a real value for it.
+   If one company is missing a KPI, do not make relative statements about it.
+3. Do NOT mention Cost of Capital or WACC unless a real numeric value exists in the table.
+4. Do NOT imply ROIC vs cost of capital unless both are present.
+5. Do NOT invent, estimate, or infer anything not in the table.
+6. EBIT Margin wording:
+   - If found_as contains "Derived: EBIT / Revenue" — say "calculated from EBIT/Revenue".
+   - If found_as is a synonym label (e.g. "EBIT margin in the Automotive segment") — it is
+     a reported figure; do NOT call it derived. BMW EBIT margin is always reported directly.
+   - Mercedes-Benz EBIT Margin is calculated from EBIT/Revenue; note this when present.
+7. If a company has all KPIs as Not Reported, omit it from comparisons and note
+   at the end that extraction was incomplete for that company.
+8. Professional register. No markdown, no bullets, no headers.
 
 Respond ONLY with the narrative paragraph.
 """,
@@ -140,11 +155,9 @@ class LangfuseCallbackService:
                 prompt_obj = self._client.get_prompt(prompt_id)
 
                 # Always call compile() — stable API across Langfuse SDK v2 and v3.
-                # compile(**{}) with no template variables returns the plain prompt text.
                 text = prompt_obj.compile(**kwargs)
 
                 # compile() on a ChatPromptClient returns a list of message dicts.
-                # We only use text prompts; convert to string defensively.
                 if isinstance(text, list):
                     text = "\n".join(
                         m.get("content", "") if isinstance(m, dict) else str(m)
@@ -158,11 +171,6 @@ class LangfuseCallbackService:
                 return text
 
             except Exception as exc:  # pylint: disable=broad-except
-                # Log the FULL exception so it is visible in the backend logs.
-                # Common causes:
-                #   - Prompt name not found in Langfuse project (case-sensitive)
-                #   - Network timeout
-                #   - SDK version mismatch (compile() signature changed)
                 logger.warning(
                     "[Langfuse] ✗ get_prompt('%s') failed: %s — using fallback prompt.",
                     prompt_id, exc,
@@ -178,7 +186,6 @@ class LangfuseCallbackService:
             )
             return f"[Prompt '{prompt_id}' not found — check prompt ID]"
 
-        # Apply any template variables
         for k, v in kwargs.items():
             text = text.replace(f"{{{k}}}", str(v))
 
@@ -195,10 +202,7 @@ class LangfuseCallbackService:
     # ── LangChain tracing ─────────────────────────────────────────────────────
 
     def get_langchain_handler(self, session_id: str = ""):
-        """
-        Return a LangChain CallbackHandler for Langfuse tracing.
-        Returns None if Langfuse is not available.
-        """
+        """Return a LangChain CallbackHandler for Langfuse tracing."""
         if not self._available or not self._client:
             return None
         try:

@@ -1,4 +1,5 @@
 
+
 import asyncio
 import base64
 import json
@@ -169,15 +170,17 @@ def _detect_period(text: str, report_type: str) -> str:
 
 # Smart chunking limits — see _extract_pdf_text docstring for rationale.
 _MAX_CHARS_QUARTERLY  = 100_000
-_MAX_CHARS_FY_HEAD    =  30_000   # Front: cover page, headline KPIs (Revenue/EBIT/FCF)
-_MAX_CHARS_FY_MIDDLE  =  60_000   # Middle-A and Middle-B windows (each 60k)
-                                   # (Net Liquidity, ROIC, shares outstanding for BMW)
-_MAX_CHARS_FY_TAIL    =  80_000   # End: financial statements, notes, EPS tables
+_MAX_CHARS_FY_HEAD    =  30_000   # Cover page + headline KPIs (Revenue/EBIT/FCF)
+_MAX_CHARS_FY_NEAR    =  80_000   # ~15% centroid: management report section
+                                   # VW EPS at char 330k (15% of 2.2M) lives here
+_MAX_CHARS_FY_MIDDLE  =  60_000   # ~70% centroid: BMW Net Financial Assets
+_MAX_CHARS_FY_TAIL    = 110_000   # Last 110k: Mercedes shares, financial statement notes
 
 # Middle chunk target: chars at ~55–65% of document length.
 # BMW Net Financial Assets estimated at chars ~1.1M–1.4M in a 1.7M-char doc (~65–83%).
 # Taking the midpoint at 70% of document consistently captures this section.
-_MAX_CHARS_FY_MIDDLE_CENTRE_PCT = 0.70  # take middle chunk centred at 70% of doc
+_MAX_CHARS_FY_NEAR_CENTRE_PCT   = 0.15  # ~15% centroid for management report section
+_MAX_CHARS_FY_MIDDLE_CENTRE_PCT = 0.70  # ~70% centroid for deep financial notes
 
 
 def _extract_pdf_text(content_b64: str, report_type: str = "Q") -> str:
@@ -208,33 +211,41 @@ def _extract_pdf_text(content_b64: str, report_type: str = "Q") -> str:
         full_text = "\n\n".join(pages)
         total_chars = len(full_text)
 
-        min_for_chunking = _MAX_CHARS_FY_HEAD + _MAX_CHARS_FY_MIDDLE + _MAX_CHARS_FY_TAIL
+        min_for_chunking = _MAX_CHARS_FY_HEAD + _MAX_CHARS_FY_NEAR + _MAX_CHARS_FY_MIDDLE + _MAX_CHARS_FY_TAIL
         if report_type == "FY" and total_chars > min_for_chunking:
             head = full_text[:_MAX_CHARS_FY_HEAD]
 
+            # Near chunk: 15% centroid — management report (EPS, dividends, KPI summaries)
+            # VW EPS is at char 330k in a 2.2M-char doc (15%); captured here.
+            near_ctr   = int(total_chars * _MAX_CHARS_FY_NEAR_CENTRE_PCT)
+            near_start = max(_MAX_CHARS_FY_HEAD, near_ctr - _MAX_CHARS_FY_NEAR // 2)
+            near_end   = min(total_chars - _MAX_CHARS_FY_TAIL, near_start + _MAX_CHARS_FY_NEAR)
+            near       = full_text[near_start:near_end]
+
             # Middle-A: 70% centroid — BMW Automotive Net Financial Assets
             mid_a_ctr   = int(total_chars * _MAX_CHARS_FY_MIDDLE_CENTRE_PCT)
-            mid_a_start = max(_MAX_CHARS_FY_HEAD, mid_a_ctr - _MAX_CHARS_FY_MIDDLE // 2)
+            mid_a_start = max(near_end, mid_a_ctr - _MAX_CHARS_FY_MIDDLE // 2)
             mid_a_end   = min(total_chars - _MAX_CHARS_FY_TAIL, mid_a_start + _MAX_CHARS_FY_MIDDLE)
-            middle_a    = full_text[mid_a_start:mid_a_end]
+            middle_a    = full_text[mid_a_start:mid_a_end] if mid_a_start < mid_a_end else ""
 
-            # Middle-B: 85% centroid — balance-sheet notes, segment equity, shares outstanding
+            # Middle-B: 85% centroid — balance-sheet notes, shares outstanding
             mid_b_ctr   = int(total_chars * 0.85)
-            mid_b_start = max(mid_a_end, mid_b_ctr - _MAX_CHARS_FY_MIDDLE // 2)
+            mid_b_start = max(mid_a_end if middle_a else near_end, mid_b_ctr - _MAX_CHARS_FY_MIDDLE // 2)
             mid_b_end   = min(total_chars - _MAX_CHARS_FY_TAIL, mid_b_start + _MAX_CHARS_FY_MIDDLE)
             middle_b    = full_text[mid_b_start:mid_b_end] if mid_b_start < mid_b_end else ""
 
-            tail  = full_text[-_MAX_CHARS_FY_TAIL:]
+            tail = full_text[-_MAX_CHARS_FY_TAIL:]
 
             sep    = "\n\n[... SECTION OMITTED FOR CONTEXT WINDOW ...]\n\n"
-            parts  = [p for p in [head, middle_a, middle_b, tail] if p]
+            parts  = [p for p in [head, near, middle_a, middle_b, tail] if p]
             result = sep.join(parts)
 
             logger.info(
-                "[PDF] FY 4-chunk: %d total → "
-                "head %d + mid-A %d (%d–%d) + mid-B %d (%d–%d) + tail %d = %d chars",
+                "[PDF] FY 5-chunk: %d total → "
+                "head %d + near %d (%d–%d) + mid-A %d (%d–%d) + mid-B %d (%d–%d) + tail %d = %d chars",
                 total_chars,
                 len(head),
+                len(near),    near_start,   near_end,
                 len(middle_a), mid_a_start, mid_a_end,
                 len(middle_b), mid_b_start, mid_b_end,
                 len(tail), len(result),
@@ -378,12 +389,21 @@ class OEMGenerationService:
             f"Report type: {report_desc}\n"
             f"Period label to use in ALL tool calls: {period_label}\n"
             f"Filename: {filename}\n\n"
-            f"IMPORTANT RULES FOR THIS FILE:\n"
-            f"1. Use period='{period_label}' in every single tool call — no other value.\n"
-            f"2. Pass the `unit` field exactly as written in the report "
-            f"(e.g. 'EUR m', 'EUR bn', 'in millions') — the system will convert automatically.\n"
-            f"3. Call every tool. If a KPI is absent, call the tool with not_reported=true.\n"
-            f"4. Do NOT skip tools for missing data."
+            f"MANDATORY RULES:\n"
+            f"1. Use period='{period_label}' in EVERY tool call, no exceptions.\n"
+            f"2. Pass unit exactly as written in the report (e.g. 'EUR m', 'EUR bn').\n"
+            f"3. YOU MUST CALL ALL 9 TOOLS — once each. "
+            f"If a KPI is absent, call the tool with not_reported=true. "
+            f"Skipping any tool is an error.\n"
+            f"4. The report text arrives in sections separated by "
+            f"'[... SECTION OMITTED FOR CONTEXT WINDOW ...]' markers. "
+            f"Search EVERY section before marking a KPI as not_reported.\n"
+            f"5. Net Liquidity synonyms: 'Automotive Net Financial Assets', "
+            f"'Net Financial Assets', 'Industrial Net Liquidity'.\n"
+            f"6. Market Cap: find shares outstanding from 'share capital', "
+            f"'shares issued', 'number of shares', 'weighted average shares'. "
+            f"Pass the value in millions to extract_market_cap.\n"
+            f"7. Output ONLY tool calls. No plain text whatsoever."
         )
 
         messages = [
@@ -401,6 +421,30 @@ class OEMGenerationService:
             extraction = self._parse_single_file_response(
                 response, company, report_type, period_label
             )
+            # ── Retry on 0 tool calls ─────────────────────────────────────
+            # If model returned no tool calls (plain text, refusal, context
+            # overload), retry once with a simplified prompt and 60k chars.
+            if len(getattr(response, "tool_calls", []) or []) == 0:
+                logger.warning(
+                    "[Agent] 0 tool calls for %s (%s) — retrying with trimmed context",
+                    company, period_label,
+                )
+                retry_msgs = [
+                    SystemMessage(content=(
+                        f"You are a financial KPI extractor. "
+                        f"Extract from this {company} {period_label} report. "
+                        f"Call ALL 9 tools. not_reported=true for missing. "
+                        f"period='{period_label}' in every call. Tool calls only."
+                    )),
+                    HumanMessage(content=f"Report (first 60k chars):\n\n{extracted_text[:60_000]}"),
+                ]
+                retry_resp = await self._llm.ainvoke(retry_msgs, config=config)
+                n_retry = len(getattr(retry_resp, "tool_calls", []) or [])
+                logger.info("[Agent] Retry %s (%s): %d tool calls", company, period_label, n_retry)
+                if n_retry > 0:
+                    extraction = self._parse_single_file_response(
+                        retry_resp, company, report_type, period_label
+                    )
             logger.info("[Agent] ✓ Finished extraction: %s (%s)", company, period_label)
             return extraction
         except Exception as exc:  # pylint: disable=broad-except
@@ -417,7 +461,15 @@ class OEMGenerationService:
         tool_calls = getattr(response, "tool_calls", []) or []
         tool_results: dict = {}
 
-        logger.debug("[Agent] %s (%s): %d tool calls", company, period_label, len(tool_calls))
+        n_calls = len(tool_calls)
+        logger.info("[Agent] %s (%s): %d tool calls", company, period_label, n_calls)
+        if n_calls == 0:
+            raw = (getattr(response, "content", "") or "")[:400].replace("\n", " ").strip()
+            logger.warning("[Agent] 0 tool calls — raw response: %s", raw or "<empty>")
+        elif n_calls < 9:
+            called = {tc.get("name") for tc in tool_calls}
+            missing = [t.name for t in self._tools if t.name not in called]
+            logger.warning("[Agent] Only %d/9 tools called. Missing: %s", n_calls, missing)
 
         for tc in tool_calls:
             name = tc.get("name", "")
@@ -599,7 +651,12 @@ class OEMGenerationService:
                     continue
                 if kpi.get("is_substitute"):
                     # Deduplicate: same company + canonical + found_as across FY and Q reports
-                    dedup_key = (co, kpi["canonical_name"], kpi.get("found_as", ""))
+                    # Normalise found_as: lowercase + strip parentheticals
+                    # so "Earnings per share" and "Earnings per share (in euros)"
+                    # deduplicate to the same note.
+                    _fa = kpi.get("found_as", "").lower().strip()
+                    _fa = _fa.split("(")[0].strip()
+                    dedup_key = (co, kpi["canonical_name"], _fa)
                     if dedup_key not in seen_notes:
                         seen_notes.add(dedup_key)
                         notes.append(dict(
