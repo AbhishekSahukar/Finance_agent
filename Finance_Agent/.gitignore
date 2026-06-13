@@ -1,0 +1,101 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Python build
+build/
+dist/
+*.egg-info/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# =========================
+# Environment Variables
+# =========================
+.env
+.env.*
+!.env.sample
+
+# =========================
+# FastAPI
+# =========================
+backend/.env
+backend/logs/
+backend/*.log
+
+# =========================
+# Node / React / Vite
+# =========================
+node_modules/
+dist/
+.vite/
+
+# npm/yarn
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+.history/
+
+# =========================
+# JetBrains
+# =========================
+.idea/
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# LangGraph / LangChain
+# =========================
+.langgraph/
+checkpoints/
+
+# =========================
+# Langfuse
+# =========================
+langfuse.db
+*.sqlite
+*.sqlite3
+
+# =========================
+# Uploaded PDFs (optional)
+# =========================
+uploads/
+temp/
+tmp/
+
+# =========================
+# Generated Reports
+# =========================
+reports/
+exports/
+
+# =========================
+# Secrets
+# =========================
+*.pem
+*.key
+*.crt
