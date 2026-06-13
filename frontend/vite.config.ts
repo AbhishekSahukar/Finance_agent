@@ -16,4 +16,15 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    // Allow dynamic imports from CDN (jsPDF) — these are not bundled,
+    // they are fetched at runtime when the user clicks Download PDF.
+    rollupOptions: {
+      external: [],
+    },
+  },
+  optimizeDeps: {
+    // Do not pre-bundle CDN URLs — they are loaded on demand
+    exclude: [],
+  },
 });
