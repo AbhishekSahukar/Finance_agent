@@ -1,0 +1,31 @@
+# Render deployment — Docker runtime
+# https://render.com/docs/docker
+
+services:
+  - type: web
+    name: oem-financial-agent
+    runtime: docker           # use the Dockerfile at repo root
+    dockerfilePath: ./Dockerfile
+    region: frankfurt
+    plan: free
+    envVars:
+      # ── Required ─────────────────────────────────────────────────────────
+      - key: OPENROUTER_API_KEY
+        sync: false           # set in Render dashboard — never in this file
+      # ── Defaults (safe to commit) ─────────────────────────────────────────
+      - key: OPENROUTER_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: OPENROUTER_MODEL
+        value: deepseek/deepseek-v4-flash
+      # ── Langfuse (optional) ───────────────────────────────────────────────
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://cloud.langfuse.com
+      # ── App settings ──────────────────────────────────────────────────────
+      - key: MAX_PDF_SIZE_MB
+        value: "50"
+      - key: AGENT_TIMEOUT_SECONDS
+        value: "300"

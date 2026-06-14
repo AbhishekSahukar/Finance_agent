@@ -269,3 +269,6 @@ oem-agent/
         ├── App.tsx                     Upload UI, KPI table, PDF download
         └── types/api.ts                TypeScript API types
 ```
+## License
+
+This project is provided for demonstration and portfolio purposes only. All rights reserved. Unauthorized copying, modification, distribution, or commercial use is prohibited without prior permission.
