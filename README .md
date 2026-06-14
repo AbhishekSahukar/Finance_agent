@@ -1,4 +1,4 @@
-# OEM Financial Benchmarking Agent
+# Financial Agent
 
 An AI agent that extracts, normalises, and compares financial KPIs from automotive OEM annual and quarterly reports. Upload PDFs for up to three companies and receive a structured comparison table, an executive summary, and a downloadable PDF report — all generated from the actual document text, with no hardcoded values.
 
